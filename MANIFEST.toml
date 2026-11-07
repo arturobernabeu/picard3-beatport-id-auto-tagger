@@ -1,0 +1,19 @@
+uuid = "985395ec-d14e-4c76-8508-d993106b5ecd"
+name = "picard3-beatport-id-auto-tagger"
+description = "Panel lateral para asignar BEATPORT_TRACK_ID y BEATPORT_RELEASE_ID a las pistas seleccionadas."
+long_description = """
+Añade un panel acoplable a la ventana principal de Picard para escribir manualmente
+las etiquetas **BEATPORT_TRACK_ID** y **BEATPORT_RELEASE_ID** en uno o varios archivos.
+
+- Funciona con archivos, pistas, álbumes y clústeres seleccionados.
+- Solo admite IDs numéricos.
+- El panel puede volver a mostrarse desde *Herramientas → Plugins → picard3-beatport-id-auto-tagger*.
+"""
+version = "1.0.0"
+api = ["3.0"]
+authors = ["Arturo"]
+license = "GPL-2.0-or-later"
+license_url = "https://www.gnu.org/licenses/gpl-2.0.html"
+categories = ["metadata", "ui"]
+min_python_version = "3.10"
+source_locale = "es"
