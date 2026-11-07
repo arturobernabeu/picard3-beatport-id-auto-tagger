@@ -35,12 +35,12 @@ Requisitos: Picard 3 (API de plugins `3.0`) y Python 3.10 o superior.
 
 ## Cómo obtiene los datos
 
-Lee el JSON (`__NEXT_DATA__`) que Beatport incluye en la página pública de cada lanzamiento. No usa tokens de API ni cookies, hace una única petición por lanzamiento y guarda el resultado en memoria durante la sesión.
+Lee el JSON (`__NEXT_DATA__`) que Beatport incluye en la página pública de cada lanzamiento. No usa tokens de API ni cookies, hace una petición por cada página de pistas (Beatport sirve 100 por página, así que la mayoría de lanzamientos necesitan una sola) y guarda el resultado en memoria durante la sesión.
 
 ## Limitaciones conocidas
 
 - Al depender del HTML de Beatport, un cambio en su web puede romper la lectura del listado.
-- Solo se lee la primera página de pistas del lanzamiento: si Beatport declara más pistas de las obtenidas, el panel avisa con «listado incompleto».
+- Se leen hasta 20 páginas (2000 pistas) por lanzamiento. Si Beatport declara más pistas de las obtenidas, el panel avisa con «listado incompleto».
 - Las posiciones de pista se estiman ordenando por ID de pista de Beatport, por lo que el emparejamiento por número de pista debe revisarse.
 
 ## Licencia
