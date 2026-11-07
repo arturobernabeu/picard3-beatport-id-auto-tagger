@@ -9,7 +9,7 @@ las etiquetas **BEATPORT_TRACK_ID** y **BEATPORT_RELEASE_ID** en uno o varios ar
 - Solo admite IDs numéricos.
 - El panel puede volver a mostrarse desde *Herramientas → Plugins → picard3-beatport-id-auto-tagger*.
 """
-version = "1.0.0"
+version = "1.1.0"
 api = ["3.0"]
 authors = ["Arturo"]
 license = "GPL-2.0-or-later"

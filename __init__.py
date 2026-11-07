@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 #
-# picard3-beatport-id-auto-tagger 1.0.0 — plugin para MusicBrainz Picard 3 (API de plugins v3).
+# picard3-beatport-id-auto-tagger 1.1.0 — plugin para MusicBrainz Picard 3 (API de plugins v3).
 # Autor: Arturo
 # Licencia: GPL-2.0-or-later
 #
