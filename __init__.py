@@ -9,9 +9,10 @@
 # posición) y escribe BEATPORT_TRACK_ID y BEATPORT_RELEASE_ID.
 #
 # Fuente de datos: el JSON que Beatport renderiza en el servidor
-# (__NEXT_DATA__) en https://www.beatport.com/release/x/<release_id>.
-# No usa tokens de la API ni cookies: una única petición por lanzamiento,
-# con caché en memoria.
+# (__NEXT_DATA__). La página del lanzamiento
+# (https://www.beatport.com/release/x/<release_id>) solo enumera los IDs de
+# sus pistas; los datos de cada una se leen de /track/x/<track_id>.
+# No usa tokens de la API ni cookies; caché en memoria por lanzamiento.
 
 from __future__ import annotations
 
@@ -36,15 +37,15 @@ DOCK_OBJECT_NAME = "picard3_beatport_id_auto_tagger_dock"
 
 # Beatport acepta cualquier slug si el ID es correcto (verificado).
 RELEASE_URL_TEMPLATE = "https://www.beatport.com/release/x/{release_id}"
+TRACK_URL_TEMPLATE = "https://www.beatport.com/track/x/{track_id}"
 
 RE_RELEASE_ID = re.compile(r"^\d{1,12}$")
 RE_RELEASE_URL = re.compile(r"/release/[^/?#]+/(\d{1,12})(?:[/?#]|$)")
+RE_TRACK_REF = re.compile(r"/tracks/(\d{1,12})/?$")
 RE_NEXT_DATA = re.compile(
     r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.DOTALL
 )
 RE_NON_ALNUM = re.compile(r"[^a-z0-9]+")
-
-MAX_PAGES = 20           # Tope de seguridad (Beatport sirve 100 pistas por página)
 
 TITLE_THRESHOLD =0.82   # Similitud mínima para emparejar por título
 ARTIST_WEIGHT = 0.05     # Peso del artista como desempate
@@ -64,7 +65,7 @@ class BeatportTrack:
     mix_name: str
     artists: str
     isrc: str
-    position: int  # Estimada: orden ascendente de ID
+    position: int  # Número de pista de Beatport (o orden por ID si falta)
 
     @property
     def full_title(self) -> str:
@@ -103,12 +104,7 @@ def _normalize_isrc(value) -> str:
     return str(value or "").upper().replace("-", "").strip()
 
 
-def parse_tracks_page(
-    html: str, release_id: str, allow_empty: bool = False
-) -> tuple[list[dict], int, int]:
-    """Extrae de una página (?page=N) las pistas en bruto, el 'count' total
-    declarado y el número total de páginas. Con allow_empty, una página sin
-    pistas (más allá de la última) devuelve ([], count, pages) sin error."""
+def _page_props(html: str) -> dict:
     match = RE_NEXT_DATA.search(html)
     if not match:
         raise BeatportParseError("La página no contiene datos __NEXT_DATA__.")
@@ -116,74 +112,82 @@ def parse_tracks_page(
         data = json.loads(match.group(1))
     except ValueError as exc:
         raise BeatportParseError(f"JSON no válido: {exc}") from exc
+    props = (data.get("props") or {}).get("pageProps")
+    if not isinstance(props, dict):
+        raise BeatportParseError("La página no contiene 'pageProps'.")
+    return props
 
-    queries = (
-        data.get("props", {})
-        .get("pageProps", {})
-        .get("dehydratedState", {})
-        .get("queries", [])
-    )
-    rid = int(release_id)
 
-    for query in queries:
-        payload = (query.get("state") or {}).get("data")
-        if not isinstance(payload, dict):
-            continue
-        results = payload.get("results")
-        if allow_empty and results == []:
-            key = query.get("queryKey") or ()
-            if (len(key) > 1 and key[0] == "tracks" and isinstance(key[1], dict)
-                    and key[1].get("release_id") == rid):
-                return [], int(payload.get("count") or 0), 1
-        if not isinstance(results, list) or not results:
-            continue
-        # Solo es el listado buscado si TODAS son pistas de este lanzamiento.
-        if not all(
-            isinstance(t, dict)
-            and "mix_name" in t
-            and (t.get("release") or {}).get("id") == rid
-            for t in results
-        ):
-            continue
+def parse_release_page(html: str, release_id: str) -> tuple[list[str], int]:
+    """Devuelve los IDs de pista del lanzamiento y el total declarado
+    ('track_count'). Beatport ya no renderiza el listado de pistas en el
+    servidor, solo las URLs de cada pista en pageProps.release.tracks."""
+    release = _page_props(html).get("release")
+    if not isinstance(release, dict) or str(release.get("id")) != release_id:
+        raise BeatportParseError("No se encontraron los datos de este lanzamiento.")
+    ids: list[str] = []
+    for ref in release.get("tracks") or ():
+        if isinstance(ref, dict):  # Por si vuelven a servir objetos completos
+            tid = str(ref.get("id") or "")
+        else:
+            m = RE_TRACK_REF.search(str(ref))
+            tid = m.group(1) if m else ""
+        if tid.isdigit() and tid not in ids:
+            ids.append(tid)
+    if not ids:
+        raise BeatportParseError("El lanzamiento no contiene pistas.")
+    total = int(release.get("track_count") or 0)
+    return ids, max(total, len(ids))
 
-        count = int(payload.get("count") or len(results))
-        # 'page' llega como "1/3" (página actual / total de páginas).
-        pages = 1
-        m = re.fullmatch(r"\s*\d+\s*/\s*(\d+)\s*", str(payload.get("page") or ""))
-        if m:
-            pages = max(1, int(m.group(1)))
-        elif count > len(results):
-            pages = -(-count // len(results))
-        return results, count, pages
 
-    raise BeatportParseError(
-        "No se encontró el listado de pistas de este lanzamiento."
-    )
+def parse_track_page(html: str, track_id: str) -> dict:
+    """Extrae los datos de una pista de su página /track/x/<id>."""
+    props = _page_props(html)
+    track = props.get("track")
+    if not isinstance(track, dict) or str(track.get("track_id")) != track_id:
+        track = None
+        for query in (props.get("dehydratedState") or {}).get("queries") or ():
+            if (query.get("queryKey") or [None])[0] == f"track-details-{track_id}":
+                track = (query.get("state") or {}).get("data")
+                break
+    if not isinstance(track, dict):
+        raise BeatportParseError(f"No se encontraron los datos de la pista {track_id}.")
+    # Los remezcladores aparecen junto a los artistas; se excluyen.
+    artists = [
+        a.get("name", "") for a in (track.get("artists") or ())
+        if isinstance(a, dict) and a.get("type", "Artist") != "Remixer"
+    ]
+    number = track.get("track_number")
+    return {
+        "id": track_id,
+        "name": track.get("track_name") or track.get("name") or "",
+        "mix_name": track.get("mix_name") or "",
+        "artists": artists,
+        "isrc": track.get("isrc"),
+        "number": number if isinstance(number, int) and number > 0 else None,
+    }
 
 
 def build_release(release_id: str, raw_tracks: list[dict], count: int) -> BeatportRelease:
-    """Construye el lanzamiento con las pistas de todas las páginas
-    (sin duplicados), ordenadas por ID."""
+    """Construye el lanzamiento (sin duplicados), ordenado por número de
+    pista; las pistas sin número van al final, por ID."""
     unique = {int(t["id"]): t for t in raw_tracks}
-    ordered = [unique[k] for k in sorted(unique)]
+    ordered = sorted(
+        unique.values(),
+        key=lambda t: (t["number"] is None, t["number"] or 0, int(t["id"])),
+    )
     tracks = tuple(
         BeatportTrack(
             track_id=str(t["id"]),
-            name=(t.get("name") or "").strip(),
-            mix_name=(t.get("mix_name") or "").strip(),
-            artists=", ".join(a.get("name", "") for a in (t.get("artists") or ())),
-            isrc=_normalize_isrc(t.get("isrc")),
+            name=t["name"].strip(),
+            mix_name=t["mix_name"].strip(),
+            artists=", ".join(t["artists"]),
+            isrc=_normalize_isrc(t["isrc"]),
             position=pos,
         )
         for pos, t in enumerate(ordered, start=1)
     )
     return BeatportRelease(release_id, tracks, max(count, len(tracks)))
-
-
-def parse_release_page(html: str, release_id: str) -> BeatportRelease:
-    """Atajo para una única página."""
-    raw, count, _pages = parse_tracks_page(html, release_id)
-    return build_release(release_id, raw, count)
 
 
 def _norm(text: str) -> str:
@@ -288,46 +292,71 @@ class BeatportClient:
             return
 
         raw_tracks: list[dict] = []
-        state = {"count": 0, "pages": 1}
+        state = {"total": 0, "pending": 0, "errors": []}
 
         def finish(release, error=None):
-            if release is not None:
+            # Solo se cachean lanzamientos completos: un fallo puntual de red
+            # no debe quedarse fijado hasta reiniciar Picard.
+            if release is not None and release.complete:
                 self._cache[release_id] = release
             callback(release_id, release, error)
 
-        def request(page: int):
-            url = RELEASE_URL_TEMPLATE.format(release_id=release_id)
-            if page > 1:
-                url += f"?page={page}"
+        def get(url, on_html, what):
+            def handler(document, reply, error):
+                if error:
+                    on_html(None, f"Error de red ({what}): {reply.errorString()}")
+                    return
+                on_html(bytes(document).decode("utf-8", "replace"), None)
             self._api.web_service.get_url(
-                url=url,
-                handler=lambda document, reply, error: handler(page, document, reply, error),
-                parse_response_type=None,  # HTML en bruto
+                url=url, handler=handler, parse_response_type=None  # HTML en bruto
             )
 
-        def handler(page, document, reply, error):
-            if error:
-                finish(None, f"Error de red (página {page}): {reply.errorString()}")
-                return
-            try:
-                html = bytes(document).decode("utf-8", "replace")
-                results, count, pages = parse_tracks_page(
-                    html, release_id, allow_empty=page > 1
-                )
-                if page == 1:
-                    state["count"], state["pages"] = count, min(pages, MAX_PAGES)
-                raw_tracks.extend(results)
-                if page < state["pages"] and results:
-                    request(page + 1)  # Siguiente página, en secuencia
-                    return
-                finish(build_release(release_id, raw_tracks, state["count"]))
-            except BeatportParseError as exc:
-                finish(None, str(exc))
-            except Exception as exc:  # Defensa ante cambios en la web
-                self._api.logger.exception("Error al analizar el lanzamiento %s", release_id)
-                finish(None, f"Error inesperado: {exc}")
+        def safe(func, what):
+            """Convierte excepciones de análisis en mensajes de error."""
+            def wrapper(*args):
+                try:
+                    return func(*args)
+                except BeatportParseError as exc:
+                    return str(exc)
+                except Exception as exc:  # Defensa ante cambios en la web
+                    self._api.logger.exception("Error al analizar %s", what)
+                    return f"Error inesperado ({what}): {exc}"
+            return wrapper
 
-        request(1)
+        def on_release(html, error):
+            if error is None:
+                error = safe(start_tracks, f"el lanzamiento {release_id}")(html)
+            if error:
+                finish(None, error)
+
+        def start_tracks(html):
+            track_ids, state["total"] = parse_release_page(html, release_id)
+            state["pending"] = len(track_ids)
+            for tid in track_ids:
+                get(
+                    TRACK_URL_TEMPLATE.format(track_id=tid),
+                    lambda h, err, tid=tid: on_track(tid, h, err),
+                    f"pista {tid}",
+                )
+
+        def on_track(tid, html, error):
+            if error is None:
+                error = safe(lambda h: raw_tracks.append(parse_track_page(h, tid)),
+                             f"la pista {tid}")(html)
+            if error:
+                state["errors"].append(error)
+                self._api.logger.warning("Beatport: %s", error)
+            state["pending"] -= 1
+            if state["pending"] > 0:
+                return
+            if not raw_tracks:
+                finish(None, state["errors"][0] if state["errors"]
+                       else "No se pudo obtener ninguna pista.")
+                return
+            finish(build_release(release_id, raw_tracks, state["total"]))
+
+        get(RELEASE_URL_TEMPLATE.format(release_id=release_id), on_release,
+            f"lanzamiento {release_id}")
 
 
 # ──────────────────────────────────────────────
